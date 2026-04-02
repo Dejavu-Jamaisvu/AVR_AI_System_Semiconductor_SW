@@ -1,0 +1,24 @@
+# PlatformIO 빌드 결과물 및 임시 파일
+.pio/
+.pioenvs/
+.piolibdeps/
+
+# 라이브러리 및 하드웨어 관련 캐시
+.clang_complete
+.gcc-flags.json
+linter_checked
+
+# VS Code 관련 설정 (개인별 설정이 다르므로 제외 권장)
+.vscode/.browse.c_cpp.db
+.vscode/.google-ctags-db
+.vscode/ipch/
+.vscode/cmake-kits.json
+.vscode/extensions.json
+
+# 운영체제 생성 파일
+.DS_Store
+Thumbs.db
+
+# 민감한 정보 (와이파이 비번 등을 별도 파일에 보관할 경우)
+# *.env
+# include/secrets.h
