@@ -1,3 +1,16 @@
+# Visual Studio 로컬 캐시 및 설정 (에러의 원인)
+.vs/
+*.sln.doccounts
+*.suo
+*.user
+*.userosscache
+*.sln.icu
+
+# 빌드 결과물
+bin/
+obj/
+out/
+
 # PlatformIO 빌드 결과물 및 임시 파일
 .pio/
 .pioenvs/
