@@ -32,6 +32,12 @@ out/
 .pioenvs/
 .piolibdeps/
 
+
+# 하지만 .pio/backup 폴더와 그 안의 내용은 제외하지 않음 (깃에 포함)
+!.pio/backup/
+!.pio/backup/**
+
+
 # 라이브러리 및 하드웨어 관련 캐시
 .clang_complete
 .gcc-flags.json
