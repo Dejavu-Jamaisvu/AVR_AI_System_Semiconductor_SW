@@ -1,0 +1,13 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<Project ToolsVersion="18.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup>
+    <CustomBuild Include="D:\AVR\AVR_AI_System_Semiconductor_SW\project_arduino_win\libserialport_prof\build\CMakeFiles\f63227597206f3718f549968112f21ec\generate.stamp.rule">
+      <Filter>CMake Rules</Filter>
+    </CustomBuild>
+  </ItemGroup>
+  <ItemGroup>
+    <Filter Include="CMake Rules">
+      <UniqueIdentifier>{3AB807B2-50C8-3F23-9567-1615DDC029F3}</UniqueIdentifier>
+    </Filter>
+  </ItemGroup>
+</Project>

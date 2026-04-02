@@ -1,0 +1,10 @@
+^D:\AVR\AVR_AI_SYSTEM_SEMICONDUCTOR_SW\PROJECT_ARDUINO_WIN\LIBSERIALPORT_PROF\BUILD\CMAKEFILES\F63227597206F3718F549968112F21EC\GENERATE.STAMP.RULE
+setlocal
+"C:\Program Files\Microsoft Visual Studio\18\Community\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\cmake.exe" -SD:/AVR/AVR_AI_System_Semiconductor_SW/project_arduino_win/libserialport_prof -BD:/AVR/AVR_AI_System_Semiconductor_SW/project_arduino_win/libserialport_prof/build --check-stamp-list CMakeFiles/generate.stamp.list --vs-solution-file D:/AVR/AVR_AI_System_Semiconductor_SW/project_arduino_win/libserialport_prof/build/SerialMonitor.sln
+if %errorlevel% neq 0 goto :cmEnd
+:cmEnd
+endlocal & call :cmErrorLevel %errorlevel% & goto :cmDone
+:cmErrorLevel
+exit /b %1
+:cmDone
+if %errorlevel% neq 0 goto :VCEnd

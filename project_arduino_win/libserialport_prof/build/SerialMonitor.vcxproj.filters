@@ -1,0 +1,25 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<Project ToolsVersion="18.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup>
+    <ClCompile Include="D:\AVR\AVR_AI_System_Semiconductor_SW\project_arduino_win\libserialport_prof\main.c">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="D:\AVR\AVR_AI_System_Semiconductor_SW\libserialport\serialport.c">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="D:\AVR\AVR_AI_System_Semiconductor_SW\libserialport\windows.c">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="D:\AVR\AVR_AI_System_Semiconductor_SW\libserialport\timing.c">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+  </ItemGroup>
+  <ItemGroup>
+    <CustomBuild Include="D:\AVR\AVR_AI_System_Semiconductor_SW\project_arduino_win\libserialport_prof\CMakeLists.txt" />
+  </ItemGroup>
+  <ItemGroup>
+    <Filter Include="Source Files">
+      <UniqueIdentifier>{C4644F66-1AAE-3628-BC89-4137159DFC15}</UniqueIdentifier>
+    </Filter>
+  </ItemGroup>
+</Project>

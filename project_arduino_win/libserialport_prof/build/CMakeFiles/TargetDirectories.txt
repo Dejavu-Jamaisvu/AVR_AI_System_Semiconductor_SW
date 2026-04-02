@@ -1,0 +1,3 @@
+D:/AVR/AVR_AI_System_Semiconductor_SW/project_arduino_win/libserialport_prof/build/CMakeFiles/SerialMonitor.dir
+D:/AVR/AVR_AI_System_Semiconductor_SW/project_arduino_win/libserialport_prof/build/CMakeFiles/ALL_BUILD.dir
+D:/AVR/AVR_AI_System_Semiconductor_SW/project_arduino_win/libserialport_prof/build/CMakeFiles/ZERO_CHECK.dir
