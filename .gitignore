@@ -1,3 +1,16 @@
+#####외부라이브러리 크기 커서 에러
+# 라이브러리 및 외부 패키지 제외
+vcpkg/
+libserialport/
+project_arduino_win/libserialport/
+
+# 추가적으로 제외하면 좋은 항목들
+build/
+*.pyc
+
+
+
+########vs실행중 깃사용 에러
 # Visual Studio 로컬 캐시 및 설정 (에러의 원인)
 .vs/
 *.sln.doccounts
@@ -11,6 +24,9 @@ bin/
 obj/
 out/
 
+
+
+######PlatformIO에서 뺄거위주
 # PlatformIO 빌드 결과물 및 임시 파일
 .pio/
 .pioenvs/
