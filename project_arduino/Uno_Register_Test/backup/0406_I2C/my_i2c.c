@@ -1,4 +1,6 @@
+//my_i2c.c
 #include <avr/io.h>
+#include "my_i2c.h"
 
 void i2c_init(void) {
     TWBR = 72; // 100kHz (CPU 16MHz 기준)
