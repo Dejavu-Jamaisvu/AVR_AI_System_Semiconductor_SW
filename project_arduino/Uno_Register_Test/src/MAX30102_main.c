@@ -88,71 +88,173 @@ void run_test1_uart_raw_streaming(void) {
     }
 }
 
+// --- SpO2 및 BPM 계산을 위한 구조체 (데이터 관리용) ---
+typedef struct {
+    uint32_t red;
+    uint32_t ir;
+    float ir_avg;
+    float red_avg;
+    int bpm;
+    float spo2;
+} HealthData;
+
+// --- 내부 계산 함수 (모듈화) ---
+void calculate_health_metrics(HealthData *data, uint32_t last_beat_tick);
+
+/**
+ * [TEST 2] 통합 모니터링 모드 (BPM + SpO2)
+ * 한 번 실행하면 무한 루프로 정밀 측정을 수행합니다.
+ */
+void run_test2_bpm_stable_monitoring(void) {
+    HealthData current = {0, 0, 0, 0, 0, 98.0};
+    uint32_t last_beat_tick = 0;
+    bool rising = false;
+    float last_ir_avg = 0;
+
+    int bpm_buf[5] = {0};
+    int b_idx = 0;
+
+    printf("\n--- [TEST 2] STABLE MONITORING ---\n");
+    printf("TIME(ms), IR_AVG, BPM, SpO2(%%)\n");
+    
+    MAX30102_Init();
+
+    while (1) {
+        MAX30102_Read_FIFO(&current.red, &current.ir);
+        
+        // 필터 계수 조정 (조금 더 부드럽게)
+        current.red_avg = (current.red_avg * 0.9) + (current.red * 0.1);
+        current.ir_avg = (current.ir_avg * 0.9) + (current.ir * 0.1);
+
+        // 손가락 감지 임계값을 20000으로 하향 조정
+        if (current.ir > 20000) {
+            if (current.ir_avg > last_ir_avg) {
+                rising = true;
+            } 
+            else if (current.ir_avg < last_ir_avg && rising) {
+                rising = false; 
+                uint32_t duration = current_tick - last_beat_tick;
+                
+                if (duration >= 40 && duration <= 150) {
+                    int raw_bpm = 6000 / duration;
+                    bpm_buf[b_idx] = raw_bpm;
+                    b_idx = (b_idx + 1) % 5;
+                    
+                    int sum = 0;
+                    for(int i=0; i<5; i++) sum += bpm_buf[i];
+                    current.bpm = sum / 5;
+
+                    calculate_health_metrics(&current, last_beat_tick);
+
+                    // [%] 출력을 위해 float 대신 (정수.소수점) 방식으로 안전하게 출력
+                    int spo2_int = (int)current.spo2;
+                    int spo2_dec = (int)((current.spo2 - spo2_int) * 10);
+
+                    printf("%lu, %lu, %d, %d.%d%%\n", 
+                            current_tick * 10, (uint32_t)current.ir_avg, current.bpm, spo2_int, spo2_dec);
+                    
+                    PORTB |= (1 << LED_PIN); _delay_ms(10); PORTB &= ~(1 << LED_PIN);
+                    last_beat_tick = current_tick;
+                }
+            }
+        } else {
+            // 메시지가 너무 자주 뜨지 않게 조절
+            if (current_tick % 200 == 0) printf(">> Place Finger...\n");
+            last_beat_tick = current_tick;
+        }
+
+        last_ir_avg = current.ir_avg;
+        current_tick++;
+        _delay_ms(10); 
+    }
+}
+
+/**
+ * 산소포화도(SpO2) 상세 계산 모듈
+ */
+void calculate_health_metrics(HealthData *data, uint32_t last_beat_tick) {
+    // AC 성분(변화량)과 DC 성분(평균값)의 비율 계산
+    float red_ac = (float)data->red - data->red_avg;
+    float ir_ac = (float)data->ir - data->ir_avg;
+    
+    // R = (Red_AC / Red_DC) / (IR_AC / IR_DC)
+    float R = (fabs(red_ac) / data->red_avg) / (fabs(ir_ac) / data->ir_avg);
+    
+    // SpO2 근사식 적용
+    float spo2_val = 110.0 - (25.0 * R);
+    
+    // 수치 안정화 (보간법)
+    if (spo2_val > 100.0) spo2_val = 100.0;
+    if (spo2_val < 85.0) spo2_val = 85.0;
+    
+    data->spo2 = (data->spo2 * 0.7) + (spo2_val * 0.3);
+}
+
 /**
  * [TEST 2] 평균 필터 기반 안정적 BPM 측정 (무한 루프)
  */
 
 //"이동 평균 (Moving Average)" 한 번 더!
 //지금은 한 번 박동할 때마다 바로 BPM을 계산 -> 최근 5번의 BPM 평균값 
-void run_test2_bpm_stable_monitoring(void) {
-    uint32_t red, ir;
-    uint32_t ir_avg = 0, last_ir_avg = 0;
-    uint32_t last_beat_tick = 0;
-    bool rising = false;
+// void run_test2_bpm_stable_monitoring(void) {
+//     uint32_t red, ir;
+//     uint32_t ir_avg = 0, last_ir_avg = 0;
+//     uint32_t last_beat_tick = 0;
+//     bool rising = false;
     
-    int bpm_buffer[5] = {0};
-    int bpm_idx = 0;
-    int stable_bpm = 0;
+//     int bpm_buffer[5] = {0};
+//     int bpm_idx = 0;
+//     int stable_bpm = 0;
 
-    printf("\n--- [TEST 2] STABLE BPM MONITORING START ---\n");
-    printf("IR_AVG, RAW_BPM, STABLE_BPM\n");
+//     printf("\n--- [TEST 2] STABLE BPM MONITORING START ---\n");
+//     printf("IR_AVG, RAW_BPM, STABLE_BPM\n");
     
-    MAX30102_Init();
+//     MAX30102_Init();
 
-    while (1) {
-        MAX30102_Read_FIFO(&red, &ir);
+//     while (1) {
+//         MAX30102_Read_FIFO(&red, &ir);
         
-        // 지수 이동 평균 필터 (데이터 부드럽게)
-        ir_avg = (last_ir_avg * 7 + ir * 3) / 10;
+//         // 지수 이동 평균 필터 (데이터 부드럽게)
+//         ir_avg = (last_ir_avg * 7 + ir * 3) / 10;
 
-        if (ir > 30000) { // 손가락 감지 임계값
-            if (ir_avg > last_ir_avg) {
-                rising = true;
-            } 
-            else if (ir_avg < last_ir_avg && rising) {
-                rising = false; 
-                uint32_t duration = current_tick - last_beat_tick;
+//         if (ir > 30000) { // 손가락 감지 임계값
+//             if (ir_avg > last_ir_avg) {
+//                 rising = true;
+//             } 
+//             else if (ir_avg < last_ir_avg && rising) {
+//                 rising = false; 
+//                 uint32_t duration = current_tick - last_beat_tick;
                 
-                // 현실적인 심박 간격 (0.5초 ~ 1.2초 사이)
-                if (duration >= 50 && duration <= 120) {
-                    int raw_bpm = 6000 / duration;
+//                 // 현실적인 심박 간격 (0.5초 ~ 1.2초 사이)
+//                 if (duration >= 50 && duration <= 120) {
+//                     int raw_bpm = 6000 / duration;
                     
-                    // 최근 5개 값 평균화 (정확도 향상)
-                    bpm_buffer[bpm_idx] = raw_bpm;
-                    bpm_idx = (bpm_idx + 1) % 5;
+//                     // 최근 5개 값 평균화 (정확도 향상)
+//                     bpm_buffer[bpm_idx] = raw_bpm;
+//                     bpm_idx = (bpm_idx + 1) % 5;
                     
-                    int sum = 0;
-                    for(int i=0; i<5; i++) sum += bpm_buffer[i];
-                    stable_bpm = sum / 5;
+//                     int sum = 0;
+//                     for(int i=0; i<5; i++) sum += bpm_buffer[i];
+//                     stable_bpm = sum / 5;
 
-                    printf("%lu, %d, %d\n", ir_avg, raw_bpm, stable_bpm);
+//                     printf("%lu, %d, %d\n", ir_avg, raw_bpm, stable_bpm);
                     
-                    // 심박 시 LED 반짝임
-                    PORTB |= (1 << LED_PIN); _delay_ms(10); PORTB &= ~(1 << LED_PIN);
-                    last_beat_tick = current_tick;
-                }
-            }
-        } else {
-            // 손가락 없을 때 1초마다 대기 메시지
-            if (current_tick % 100 == 0) printf("Waiting for finger...\n");
-            last_beat_tick = current_tick; // 시간 초기화
-        }
+//                     // 심박 시 LED 반짝임
+//                     PORTB |= (1 << LED_PIN); _delay_ms(10); PORTB &= ~(1 << LED_PIN);
+//                     last_beat_tick = current_tick;
+//                 }
+//             }
+//         } else {
+//             // 손가락 없을 때 1초마다 대기 메시지
+//             if (current_tick % 100 == 0) printf("Waiting for finger...\n");
+//             last_beat_tick = current_tick; // 시간 초기화
+//         }
 
-        last_ir_avg = ir_avg;
-        current_tick++;
-        _delay_ms(10); 
-    }
-}
+//         last_ir_avg = ir_avg;
+//         current_tick++;
+//         _delay_ms(10); 
+//     }
+// }
 
 /**
  * [TEST 2] 최종 BPM 계산 및 그래프 출력 모드
