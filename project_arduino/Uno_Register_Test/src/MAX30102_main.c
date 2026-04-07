@@ -1,94 +1,24 @@
-#ifndef F_CPU
-#define F_CPU 16000000UL
-#endif
+
+//src/main.c
 
 //#define UART_BAUD 115200UL  // 데이터 양이 많으므로 115200 권장
 //platformio.ini 파일에 monitor_speed = 115200 작성필요
-
 #ifndef UART_BAUD
 #define UART_BAUD 9600UL
 #endif
 #ifndef F_CPU
 #define F_CPU 16000000UL
-#endif
-
-#ifndef F_CPU
-#define F_CPU 16000000UL
-#endif
-
-#ifndef UART_BAUD
-#define UART_BAUD 9600UL
 #endif
 
 #include <avr/io.h>
 #include <util/delay.h>
 #include <stdio.h>
 #include <stdbool.h>
+#include <math.h>
 #include "srclib/my_uart.h"
 #include "srclib/my_MAX30102.h"
 
-// --- 전역 설정 ---
-#define LED_PIN   PB5   // 아두이노 13번 LED
-uint32_t current_tick = 0;
-
-// --- 함수 선언 ---
-void run_test0_hw_i2c_check(void);
-void run_test1_uart_raw_streaming(void);
-void run_test2_bpm_stable_monitoring(void);
-
-int main(void) {
-    // 기본 초기화
-    DDRB |= (1 << LED_PIN); 
-    uart_init();
-    stdout = uart_get_stdout();
-    _delay_ms(500);
-
-    // [선택] 실행하고 싶은 테스트 하나만 주석을 해제하세요.
-    
-    // run_test0_hw_i2c_check();          // 연결 확인 (LED 깜빡임)
-    // run_test1_uart_raw_streaming();     // 원시 데이터 무한 출력
-    run_test2_bpm_stable_monitoring();  // 평균 필터 적용 BPM 무한 측정
-
-    while (1); 
-    return 0;
-}
-
-/**
- * [TEST 0] 하드웨어 연결 체크 (LED 신호)
- */
-void run_test0_hw_i2c_check(void) {
-    I2C_Init();
-    MAX30102_Write(0x09, 0x40); // 리셋
-    _delay_ms(100);
-
-    while(1) { // 무한 반복 체크
-        uint8_t id = MAX30102_Read(0xFF);
-        if (id == 0x15) {
-            PORTB |= (1 << LED_PIN); _delay_ms(200);
-            PORTB &= ~(1 << LED_PIN); _delay_ms(200);
-        } else {
-            PORTB |= (1 << LED_PIN); // 에러 시 계속 켜짐
-        }
-    }
-}
-
-/**
- * [TEST 1] 원시 데이터 무한 스트리밍 (시리얼 플로터용)
- */
-void run_test1_uart_raw_streaming(void) {
-    printf("\n--- [TEST 1] RAW DATA STREAMING START ---\n");
-    MAX30102_Init();
-    
-    uint32_t r, ir;
-    while(1) {
-        MAX30102_Read_FIFO(&r, &ir);
-        // 시리얼 플로터에서 RED와 IR을 동시에 그리기 위한 형식
-        printf("%lu,%lu\n", r, ir);
-        _delay_ms(10);
-    }
-}
-
-// --- SpO2 및 BPM 계산을 위한 구조체 (데이터 관리용) ---
+// --- 구조체 정의 ---
 typedef struct {
     uint32_t red;
     uint32_t ir;
@@ -98,97 +28,246 @@ typedef struct {
     float spo2;
 } HealthData;
 
-// --- 내부 계산 함수 (모듈화) ---
-void calculate_health_metrics(HealthData *data, uint32_t last_beat_tick);
+typedef struct {
+    float w;
+    float alpha;
+} HighPassFilter;
 
-/**
- * [TEST 2] 통합 모니터링 모드 (BPM + SpO2)
- * 한 번 실행하면 무한 루프로 정밀 측정을 수행합니다.
- */
+typedef struct {
+    int bpm_buffer[5];
+    int idx;
+    uint32_t last_beat_tick;
+    bool rising;
+} BeatDetector;
+
+#define LED_PIN PB5
+uint32_t current_tick = 0;
+
+// --- 핵심 보조 함수들 ---
+
+float update_high_pass(HighPassFilter *f, uint32_t x) {
+    float prev_w = f->w;
+    f->w = (float)x + (f->alpha * prev_w);
+    return f->w - prev_w;
+}
+
+float process_health_data(HealthData *h_data, HighPassFilter *ir_hpf) {
+    h_data->red_avg = (h_data->red_avg * 0.95) + (h_data->red * 0.05);
+    h_data->ir_avg = (h_data->ir_avg * 0.95) + (h_data->ir * 0.05);
+    return update_high_pass(ir_hpf, h_data->ir);
+}
+
+int get_averaged_bpm(BeatDetector *bd, int new_bpm) {
+    bd->bpm_buffer[bd->idx] = new_bpm;
+    bd->idx = (bd->idx + 1) % 5;
+    int sum = 0;
+    for(int i=0; i<5; i++) sum += bd->bpm_buffer[i];
+    return sum / 5;
+}
+
+void calculate_health_metrics(HealthData *data) {
+    float red_ac = (float)data->red - data->red_avg;
+    float ir_ac = (float)data->ir - data->ir_avg;
+    if (data->ir_avg > 0 && ir_ac != 0) {
+        float R = (fabs(red_ac) / data->red_avg) / (fabs(ir_ac) / data->ir_avg);
+        float spo2_val = 110.0 - (25.0 * R);
+        if (spo2_val > 100.0) spo2_val = 100.0;
+        if (spo2_val < 85.0) spo2_val = 85.0;
+        data->spo2 = (data->spo2 * 0.8) + (spo2_val * 0.2);
+    }
+}
+
+// --- 메인 모니터링 함수 ---
+
 void run_test2_bpm_stable_monitoring(void) {
-    HealthData current = {0, 0, 0, 0, 0, 98.0};
-    uint32_t last_beat_tick = 0;
-    bool rising = false;
-    float last_ir_avg = 0;
+    HealthData h_data = {0, 0, 0, 0, 0, 98.0};
+    HighPassFilter ir_hpf = {0, 0.94}; 
+    BeatDetector detector = {{0}, 0, 0, false};
+    float last_filtered_ir = 0;
+    bool is_finger_on = false; // 손가락 접촉 상태 플래그
 
-    int bpm_buf[5] = {0};
-    int b_idx = 0;
-
-    printf("\n--- [TEST 2] STABLE MONITORING ---\n");
-    printf("TIME(ms), IR_AVG, BPM, SpO2(%%)\n");
-    
     MAX30102_Init();
+    printf("\n[ SYSTEM ACTIVE ]\n");
 
     while (1) {
-        MAX30102_Read_FIFO(&current.red, &current.ir);
-        
-        // 필터 계수 조정 (조금 더 부드럽게)
-        current.red_avg = (current.red_avg * 0.9) + (current.red * 0.1);
-        current.ir_avg = (current.ir_avg * 0.9) + (current.ir * 0.1);
+        MAX30102_Read_FIFO(&h_data.red, &h_data.ir);
+        float filtered_ir = process_health_data(&h_data, &ir_hpf);
 
-        // 손가락 감지 임계값을 20000으로 하향 조정
-        if (current.ir > 20000) {
-            if (current.ir_avg > last_ir_avg) {
-                rising = true;
+        // 1. 손가락 감지 (30000 기준)
+        if (h_data.ir > 30000) { 
+            if (!is_finger_on) {
+                // 손가락을 새로 댄 경우: 타이밍 초기화
+                detector.last_beat_tick = current_tick;
+                is_finger_on = true;
+            }
+
+            // 2. 박동 검출 로직
+            if (filtered_ir > last_filtered_ir) {
+                detector.rising = true;
             } 
-            else if (current.ir_avg < last_ir_avg && rising) {
-                rising = false; 
-                uint32_t duration = current_tick - last_beat_tick;
-                
-                if (duration >= 40 && duration <= 150) {
-                    int raw_bpm = 6000 / duration;
-                    bpm_buf[b_idx] = raw_bpm;
-                    b_idx = (b_idx + 1) % 5;
+            else if (filtered_ir < last_filtered_ir && detector.rising) {
+                if (filtered_ir > 15) { // 문턱값
+                    detector.rising = false;
+                    uint32_t duration = current_tick - detector.last_beat_tick;
                     
-                    int sum = 0;
-                    for(int i=0; i<5; i++) sum += bpm_buf[i];
-                    current.bpm = sum / 5;
+                    // 3. 로그 기반 황금 간격 (45~120 Tick)
+                    if (duration >= 45 && duration <= 120) {
+                        int raw_bpm = 6000 / duration; 
+                        
+                        // 이동 평균으로 BPM 안정화
+                        h_data.bpm = (h_data.bpm == 0) ? raw_bpm : (h_data.bpm * 0.7) + (raw_bpm * 0.3);
+                        calculate_health_metrics(&h_data);
 
-                    calculate_health_metrics(&current, last_beat_tick);
-
-                    // [%] 출력을 위해 float 대신 (정수.소수점) 방식으로 안전하게 출력
-                    int spo2_int = (int)current.spo2;
-                    int spo2_dec = (int)((current.spo2 - spo2_int) * 10);
-
-                    printf("%lu, %lu, %d, %d.%d%%\n", 
-                            current_tick * 10, (uint32_t)current.ir_avg, current.bpm, spo2_int, spo2_dec);
-                    
-                    PORTB |= (1 << LED_PIN); _delay_ms(10); PORTB &= ~(1 << LED_PIN);
-                    last_beat_tick = current_tick;
+                        // 결과 출력
+                        printf("BPM: %d | SpO2: %d%%\n", h_data.bpm, (int)h_data.spo2);
+                        
+                        // LED 피드백
+                        PORTB |= (1 << LED_PIN); _delay_ms(15); PORTB &= ~(1 << LED_PIN);
+                        detector.last_beat_tick = current_tick;
+                    }
                 }
             }
-        } else {
-            // 메시지가 너무 자주 뜨지 않게 조절
-            if (current_tick % 200 == 0) printf(">> Place Finger...\n");
-            last_beat_tick = current_tick;
+        } 
+        else {
+            // 4. 손가락을 뗀 경우: 센서 및 필터 초기화
+            if (is_finger_on) {
+                printf("Sensor Reset...\n");
+                MAX30102_Init(); // 센서 재시작 (버퍼 비우기)
+                ir_hpf.w = 0;     // 필터 잔상 제거
+                detector.rising = false;
+                h_data.bpm = 0;
+                is_finger_on = false;
+            }
+            if (current_tick % 500 == 0) printf("Place Finger...\n");
         }
 
-        last_ir_avg = current.ir_avg;
+        last_filtered_ir = filtered_ir;
         current_tick++;
         _delay_ms(10); 
     }
 }
 
-/**
- * 산소포화도(SpO2) 상세 계산 모듈
- */
-void calculate_health_metrics(HealthData *data, uint32_t last_beat_tick) {
-    // AC 성분(변화량)과 DC 성분(평균값)의 비율 계산
-    float red_ac = (float)data->red - data->red_avg;
-    float ir_ac = (float)data->ir - data->ir_avg;
-    
-    // R = (Red_AC / Red_DC) / (IR_AC / IR_DC)
-    float R = (fabs(red_ac) / data->red_avg) / (fabs(ir_ac) / data->ir_avg);
-    
-    // SpO2 근사식 적용
-    float spo2_val = 110.0 - (25.0 * R);
-    
-    // 수치 안정화 (보간법)
-    if (spo2_val > 100.0) spo2_val = 100.0;
-    if (spo2_val < 85.0) spo2_val = 85.0;
-    
-    data->spo2 = (data->spo2 * 0.7) + (spo2_val * 0.3);
+int main(void) {
+    DDRB |= (1 << LED_PIN); 
+    uart_init();
+    stdout = uart_get_stdout();
+    _delay_ms(500);
+
+    run_test2_bpm_stable_monitoring(); 
+
+    while (1); 
+    return 0;
 }
+
+//============이동 평균 필터===============
+
+
+// --- 내부 계산 함수 (모듈화) ---
+//void calculate_health_metrics(HealthData *data, uint32_t last_beat_tick);
+
+
+// /**
+//  * [TEST 2] 통합 모니터링 모드 (BPM + SpO2)
+//  * 한 번 실행하면 무한 루프로 정밀 측정을 수행합니다.
+//  */
+// void run_test2_bpm_stable_monitoring(void) {
+//     HealthData current = {0, 0, 0, 0, 0, 98.0};
+//     uint32_t last_beat_tick = 0;
+//     bool rising = false;
+//     float last_ir_avg = 0;
+
+//     int bpm_buf[5] = {0};
+//     int b_idx = 0;
+
+//     printf("\n--- [TEST 2] STABLE MONITORING ---\n");
+//     printf("TIME(ms), IR_AVG, BPM, SpO2(%%)\n");
+    
+//     MAX30102_Init();
+
+//     while (1) {
+//         MAX30102_Read_FIFO(&current.red, &current.ir);
+        
+//         // 필터 계수 조정 (조금 더 부드럽게)
+//         current.red_avg = (current.red_avg * 0.9) + (current.red * 0.1);
+//         current.ir_avg = (current.ir_avg * 0.9) + (current.ir * 0.1);
+
+//         // 손가락 감지 임계값을 20000으로 하향 조정
+//         if (current.ir > 20000) {
+//             if (current.ir_avg > last_ir_avg) {
+//                 rising = true;
+//             } 
+//             else if (current.ir_avg < last_ir_avg && rising) {
+//                 rising = false; 
+//                 uint32_t duration = current_tick - last_beat_tick;
+                
+//                 if (duration >= 40 && duration <= 150) {
+//                     int raw_bpm = 6000 / duration;
+//                     bpm_buf[b_idx] = raw_bpm;
+//                     b_idx = (b_idx + 1) % 5;
+                    
+//                     int sum = 0;
+//                     for(int i=0; i<5; i++) sum += bpm_buf[i];
+//                     current.bpm = sum / 5;
+
+//                     calculate_health_metrics(&current, last_beat_tick);
+
+//                     // [%] 출력을 위해 float 대신 (정수.소수점) 방식으로 안전하게 출력
+//                     int spo2_int = (int)current.spo2;
+//                     int spo2_dec = (int)((current.spo2 - spo2_int) * 10);
+
+//                     printf("%lu, %lu, %d, %d.%d%%\n", 
+//                             current_tick * 10, (uint32_t)current.ir_avg, current.bpm, spo2_int, spo2_dec);
+                    
+//                     PORTB |= (1 << LED_PIN); _delay_ms(10); PORTB &= ~(1 << LED_PIN);
+//                     last_beat_tick = current_tick;
+//                 }
+//             }
+//         } else {
+//             // 메시지가 너무 자주 뜨지 않게 조절
+//             if (current_tick % 200 == 0) printf(">> Place Finger...\n");
+//             last_beat_tick = current_tick;
+//         }
+
+//         last_ir_avg = current.ir_avg;
+//         current_tick++;
+//         _delay_ms(10); 
+//     }
+// }
+
+// /**
+//  * 산소포화도(SpO2) 상세 계산 모듈
+//  */
+// void calculate_health_metrics(HealthData *data, uint32_t last_beat_tick) {
+//     // AC 성분(변화량)과 DC 성분(평균값)의 비율 계산
+//     float red_ac = (float)data->red - data->red_avg;
+//     float ir_ac = (float)data->ir - data->ir_avg;
+    
+//     // R = (Red_AC / Red_DC) / (IR_AC / IR_DC)
+//     float R = (fabs(red_ac) / data->red_avg) / (fabs(ir_ac) / data->ir_avg);
+    
+//     // SpO2 근사식 적용
+//     float spo2_val = 110.0 - (25.0 * R);
+    
+//     // 수치 안정화 (보간법)
+//     if (spo2_val > 100.0) spo2_val = 100.0;
+//     if (spo2_val < 85.0) spo2_val = 85.0;
+    
+//     data->spo2 = (data->spo2 * 0.7) + (spo2_val * 0.3);
+// }
+
+
+
+
+
+
+
+
+
+
+
+
+//=========================================================
+
 
 /**
  * [TEST 2] 평균 필터 기반 안정적 BPM 측정 (무한 루프)
