@@ -57,6 +57,12 @@ uint8_t MAX30102_Read(uint8_t reg) {
     return data;
 }
 
+
+// 추가: 인터럽트 상태를 읽어서 클리어하는 함수
+uint8_t MAX30102_Read_Interrupt_Status(void) {
+    return MAX30102_Read(REG_INTR_STATUS_1); // 0x00 레지스터 읽기
+}
+
 // void MAX30102_Init(void) {
 //     I2C_Init();
 //     MAX30102_Write(0x09, 0x40); // Reset
@@ -65,6 +71,7 @@ uint8_t MAX30102_Read(uint8_t reg) {
 //     MAX30102_Write(REG_LED1_PA, 0x24);     // Red LED 전류 설정
 //     MAX30102_Write(REG_LED2_PA, 0x24);     // IR LED 전류 설정
 // }
+
 
 void MAX30102_Init(void) {
     I2C_Init();
@@ -80,6 +87,10 @@ void MAX30102_Init(void) {
     MAX30102_Write(REG_SPO2_CONFIG, 0x27); // 411us pulse width, 100sps
     MAX30102_Write(REG_LED1_PA, 0x24);     // Red LED 전류 설정
     MAX30102_Write(REG_LED2_PA, 0x24);     // IR LED 전류 설정
+
+    // [핵심 추가] 인터럽트 활성화 (데이터 준비 시 INT 핀 신호 발생)
+    // 0x02 레지스터에 0x40을 쓰면 'New FIFO Data Ready' 인터럽트가 켜집니다.
+    MAX30102_Write(0x02, 0x40);
 }
 
 void MAX30102_Read_FIFO(uint32_t *red, uint32_t *ir) {

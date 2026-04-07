@@ -17,6 +17,7 @@
 void I2C_Init(void);
 void MAX30102_Write(uint8_t reg, uint8_t data);
 uint8_t MAX30102_Read(uint8_t reg);
+uint8_t MAX30102_Read_Interrupt_Status(void); //인터럽트 추가
 void MAX30102_Init(void);
 void MAX30102_Read_FIFO(uint32_t *red, uint32_t *ir);
 

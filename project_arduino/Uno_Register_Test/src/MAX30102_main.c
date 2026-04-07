@@ -3,6 +3,8 @@
 
 //#define UART_BAUD 115200UL  // 데이터 양이 많으므로 115200 권장
 //platformio.ini 파일에 monitor_speed = 115200 작성필요
+
+//============인터럽트 사용===============
 #ifndef UART_BAUD
 #define UART_BAUD 9600UL
 #endif
@@ -12,152 +14,311 @@
 
 #include <avr/io.h>
 #include <util/delay.h>
+#include <avr/interrupt.h>
 #include <stdio.h>
 #include <stdbool.h>
 #include <math.h>
+
 #include "srclib/my_uart.h"
 #include "srclib/my_MAX30102.h"
 
-// --- 구조체 정의 ---
+// --- [1. 구조체 및 전역 변수] ---
 typedef struct {
-    uint32_t red;
-    uint32_t ir;
-    float ir_avg;
-    float red_avg;
-    int bpm;
-    float spo2;
+    uint32_t red; uint32_t ir;
+    float ir_avg; float red_avg;
+    int bpm; float spo2;
 } HealthData;
 
-typedef struct {
-    float w;
-    float alpha;
-} HighPassFilter;
-
-typedef struct {
-    int bpm_buffer[5];
-    int idx;
-    uint32_t last_beat_tick;
-    bool rising;
-} BeatDetector;
+typedef struct { float w; float alpha; } HighPassFilter;
+typedef struct { uint32_t last_beat_tick; bool rising; } BeatDetector;
 
 #define LED_PIN PB5
-uint32_t current_tick = 0;
+volatile bool data_ready = false; 
+uint32_t global_tick = 0;
 
-// --- 핵심 보조 함수들 ---
+ISR(INT0_vect) { data_ready = true; }
 
-float update_high_pass(HighPassFilter *f, uint32_t x) {
+// --- [2. 알고리즘 모듈] ---
+
+// 필터 계수를 0.90으로 조정하여 빠른 변화에 대응
+float apply_filter(HighPassFilter *f, uint32_t raw_val) {
     float prev_w = f->w;
-    f->w = (float)x + (f->alpha * prev_w);
+    f->w = (float)raw_val + (f->alpha * prev_w);
     return f->w - prev_w;
 }
 
-float process_health_data(HealthData *h_data, HighPassFilter *ir_hpf) {
-    h_data->red_avg = (h_data->red_avg * 0.95) + (h_data->red * 0.05);
-    h_data->ir_avg = (h_data->ir_avg * 0.95) + (h_data->ir * 0.05);
-    return update_high_pass(ir_hpf, h_data->ir);
-}
-
-int get_averaged_bpm(BeatDetector *bd, int new_bpm) {
-    bd->bpm_buffer[bd->idx] = new_bpm;
-    bd->idx = (bd->idx + 1) % 5;
-    int sum = 0;
-    for(int i=0; i<5; i++) sum += bd->bpm_buffer[i];
-    return sum / 5;
-}
-
-void calculate_health_metrics(HealthData *data) {
-    float red_ac = (float)data->red - data->red_avg;
-    float ir_ac = (float)data->ir - data->ir_avg;
-    if (data->ir_avg > 0 && ir_ac != 0) {
-        float R = (fabs(red_ac) / data->red_avg) / (fabs(ir_ac) / data->ir_avg);
-        float spo2_val = 110.0 - (25.0 * R);
-        if (spo2_val > 100.0) spo2_val = 100.0;
-        if (spo2_val < 85.0) spo2_val = 85.0;
-        data->spo2 = (data->spo2 * 0.8) + (spo2_val * 0.2);
+void update_health_stats(HealthData *d) {
+    // 평균값 추적을 더 부드럽게 (0.95 : 0.05)
+    d->red_avg = (d->red_avg * 0.98) + (d->red * 0.02);
+    d->ir_avg = (d->ir_avg * 0.98) + (d->ir * 0.02);
+    
+    float red_ac = (float)d->red - d->red_avg;
+    float ir_ac = (float)d->ir - d->ir_avg;
+    
+    if (d->ir_avg > 0) {
+        float R = (fabs(red_ac) / d->red_avg) / (fabs(ir_ac) / d->ir_avg);
+        float s = 110.0 - (25.0 * R);
+        if (s > 100.0) s = 100.0; if (s < 88.0) s = 88.0; // 하한선을 88로 상향
+        
+        // SpO2 값의 급격한 변화 방지 (느리게 반영)
+        d->spo2 = (d->spo2 * 0.9) + (s * 0.1);
     }
 }
 
-// --- 메인 모니터링 함수 ---
+// 박동 분석 엔진 (문턱값 및 범위 최적화)
+bool process_pulse_logic(HealthData *d, HighPassFilter *f, BeatDetector *bd, float *last_f) {
+    float cur_f = apply_filter(f, d->ir);
+    bool detected = false;
 
-void run_test2_bpm_stable_monitoring(void) {
-    HealthData h_data = {0, 0, 0, 0, 0, 98.0};
-    HighPassFilter ir_hpf = {0, 0.94}; 
-    BeatDetector detector = {{0}, 0, 0, false};
-    float last_filtered_ir = 0;
-    bool is_finger_on = false; // 손가락 접촉 상태 플래그
+    if (cur_f > *last_f) bd->rising = true;
+    else if (cur_f < *last_f && bd->rising) {
+        // 문턱값을 30으로 높여 미세 노이즈 무시
+        if (cur_f > 30) { 
+            bd->rising = false;
+            uint32_t dur = global_tick - bd->last_beat_tick;
+            
+            // 정상적인 인간의 맥박 범위 (40~130 BPM)에 집중
+            if (dur >= 45 && dur <= 150) { 
+                int raw = 6000 / dur;
+                // BPM 튀는 현상 방지 (이전 값 비중 확대)
+                d->bpm = (d->bpm == 0) ? raw : (d->bpm * 0.85) + (raw * 0.15);
+                update_health_stats(d);
+                detected = true;
+            }
+            bd->last_beat_tick = global_tick;
+        }
+    }
+    *last_f = cur_f;
+    return detected;
+}
+
+// --- [3. 메인 로직] ---
+
+void init_all(void) {
+    DDRB |= (1 << LED_PIN);
+    uart_init();
+    stdout = uart_get_stdout();
+    _delay_ms(200);
+
+    DDRD &= ~(1 << PD2); 
+    PORTD |= (1 << PD2); 
+    EICRA |= (1 << ISC01); 
+    EIMSK |= (1 << INT0);  
+    sei();
 
     MAX30102_Init();
-    printf("\n[ SYSTEM ACTIVE ]\n");
-
-    while (1) {
-        MAX30102_Read_FIFO(&h_data.red, &h_data.ir);
-        float filtered_ir = process_health_data(&h_data, &ir_hpf);
-
-        // 1. 손가락 감지 (30000 기준)
-        if (h_data.ir > 30000) { 
-            if (!is_finger_on) {
-                // 손가락을 새로 댄 경우: 타이밍 초기화
-                detector.last_beat_tick = current_tick;
-                is_finger_on = true;
-            }
-
-            // 2. 박동 검출 로직
-            if (filtered_ir > last_filtered_ir) {
-                detector.rising = true;
-            } 
-            else if (filtered_ir < last_filtered_ir && detector.rising) {
-                if (filtered_ir > 15) { // 문턱값
-                    detector.rising = false;
-                    uint32_t duration = current_tick - detector.last_beat_tick;
-                    
-                    // 3. 로그 기반 황금 간격 (45~120 Tick)
-                    if (duration >= 45 && duration <= 120) {
-                        int raw_bpm = 6000 / duration; 
-                        
-                        // 이동 평균으로 BPM 안정화
-                        h_data.bpm = (h_data.bpm == 0) ? raw_bpm : (h_data.bpm * 0.7) + (raw_bpm * 0.3);
-                        calculate_health_metrics(&h_data);
-
-                        // 결과 출력
-                        printf("BPM: %d | SpO2: %d%%\n", h_data.bpm, (int)h_data.spo2);
-                        
-                        // LED 피드백
-                        PORTB |= (1 << LED_PIN); _delay_ms(15); PORTB &= ~(1 << LED_PIN);
-                        detector.last_beat_tick = current_tick;
-                    }
-                }
-            }
-        } 
-        else {
-            // 4. 손가락을 뗀 경우: 센서 및 필터 초기화
-            if (is_finger_on) {
-                printf("Sensor Reset...\n");
-                MAX30102_Init(); // 센서 재시작 (버퍼 비우기)
-                ir_hpf.w = 0;     // 필터 잔상 제거
-                detector.rising = false;
-                h_data.bpm = 0;
-                is_finger_on = false;
-            }
-            if (current_tick % 500 == 0) printf("Place Finger...\n");
-        }
-
-        last_filtered_ir = filtered_ir;
-        current_tick++;
-        _delay_ms(10); 
-    }
+    MAX30102_Read_Interrupt_Status(); 
+    printf("\n[ SYSTEM CALIBRATED ]\n");
 }
 
 int main(void) {
-    DDRB |= (1 << LED_PIN); 
-    uart_init();
-    stdout = uart_get_stdout();
-    _delay_ms(500);
+    init_all();
 
-    run_test2_bpm_stable_monitoring(); 
+    HealthData h_data = {0, 0, 0, 0, 0, 98.0};
+    HighPassFilter ir_hpf = {0, 0.90}; // 필터 알파값 0.90으로 조정
+    BeatDetector detector = {0, false};
+    float last_v = 0;
+    bool is_on = false;
+    uint16_t watchdog = 0;
 
-    while (1); 
-    return 0;
+    while (1) {
+        if (data_ready) {
+            data_ready = false;
+            watchdog = 0;
+
+            MAX30102_Read_FIFO(&h_data.red, &h_data.ir);
+            MAX30102_Read_Interrupt_Status();
+
+            // 히스테리시스 구간 (30000 ~ 22000)
+            if (h_data.ir > 30000) {
+                if (!is_on) {
+                    detector.last_beat_tick = global_tick;
+                    is_on = true;
+                    printf("\n>>> Measuring...\n");
+                }
+
+                if (process_pulse_logic(&h_data, &ir_hpf, &detector, &last_v)) {
+                    // SpO2가 너무 낮게 나오면 출력 시 보정 (디스플레이용)
+                    printf("BPM: %d | SpO2: %d%%\n", h_data.bpm, (int)h_data.spo2);
+                    PORTB |= (1 << LED_PIN); _delay_ms(15); PORTB &= ~(1 << LED_PIN);
+                }
+            } 
+            else if (h_data.ir < 22000) {
+                if (is_on) {
+                    printf("\n>>> Stop. Resetting...\n");
+                    ir_hpf.w = 0; h_data.bpm = 0; h_data.spo2 = 98.0;
+                    is_on = false;
+                }
+                if (global_tick % 400 == 0) printf("Ready for Finger...\r");
+            }
+            global_tick++;
+        } 
+        else {
+            _delay_ms(1);
+            if (++watchdog > 3000) {
+                MAX30102_Read_Interrupt_Status();
+                watchdog = 0;
+            }
+        }
+    }
 }
+
+//============인터럽트 사용전===============
+// #ifndef UART_BAUD
+// #define UART_BAUD 9600UL
+// #endif
+// #ifndef F_CPU
+// #define F_CPU 16000000UL
+// #endif
+
+// #include <avr/io.h>
+// #include <util/delay.h>
+// #include <stdio.h>
+// #include <stdbool.h>
+// #include <math.h>
+// #include "srclib/my_uart.h"
+// #include "srclib/my_MAX30102.h"
+
+// // --- 구조체 정의 ---
+// typedef struct {
+//     uint32_t red;
+//     uint32_t ir;
+//     float ir_avg;
+//     float red_avg;
+//     int bpm;
+//     float spo2;
+// } HealthData;
+
+// typedef struct {
+//     float w;
+//     float alpha;
+// } HighPassFilter;
+
+// typedef struct {
+//     int bpm_buffer[5];
+//     int idx;
+//     uint32_t last_beat_tick;
+//     bool rising;
+// } BeatDetector;
+
+// #define LED_PIN PB5
+// uint32_t current_tick = 0;
+
+// // --- 핵심 보조 함수들 ---
+
+// float update_high_pass(HighPassFilter *f, uint32_t x) {
+//     float prev_w = f->w;
+//     f->w = (float)x + (f->alpha * prev_w);
+//     return f->w - prev_w;
+// }
+
+// float process_health_data(HealthData *h_data, HighPassFilter *ir_hpf) {
+//     h_data->red_avg = (h_data->red_avg * 0.95) + (h_data->red * 0.05);
+//     h_data->ir_avg = (h_data->ir_avg * 0.95) + (h_data->ir * 0.05);
+//     return update_high_pass(ir_hpf, h_data->ir);
+// }
+
+// int get_averaged_bpm(BeatDetector *bd, int new_bpm) {
+//     bd->bpm_buffer[bd->idx] = new_bpm;
+//     bd->idx = (bd->idx + 1) % 5;
+//     int sum = 0;
+//     for(int i=0; i<5; i++) sum += bd->bpm_buffer[i];
+//     return sum / 5;
+// }
+
+// void calculate_health_metrics(HealthData *data) {
+//     float red_ac = (float)data->red - data->red_avg;
+//     float ir_ac = (float)data->ir - data->ir_avg;
+//     if (data->ir_avg > 0 && ir_ac != 0) {
+//         float R = (fabs(red_ac) / data->red_avg) / (fabs(ir_ac) / data->ir_avg);
+//         float spo2_val = 110.0 - (25.0 * R);
+//         if (spo2_val > 100.0) spo2_val = 100.0;
+//         if (spo2_val < 85.0) spo2_val = 85.0;
+//         data->spo2 = (data->spo2 * 0.8) + (spo2_val * 0.2);
+//     }
+// }
+
+// // --- 메인 모니터링 함수 ---
+
+// void run_test2_bpm_stable_monitoring(void) {
+//     HealthData h_data = {0, 0, 0, 0, 0, 98.0};
+//     HighPassFilter ir_hpf = {0, 0.94}; 
+//     BeatDetector detector = {{0}, 0, 0, false};
+//     float last_filtered_ir = 0;
+//     bool is_finger_on = false; // 손가락 접촉 상태 플래그
+
+//     MAX30102_Init();
+//     printf("\n[ SYSTEM ACTIVE ]\n");
+
+//     while (1) {
+//         MAX30102_Read_FIFO(&h_data.red, &h_data.ir);
+//         float filtered_ir = process_health_data(&h_data, &ir_hpf);
+
+//         // 1. 손가락 감지 (30000 기준)
+//         if (h_data.ir > 30000) { 
+//             if (!is_finger_on) {
+//                 // 손가락을 새로 댄 경우: 타이밍 초기화
+//                 detector.last_beat_tick = current_tick;
+//                 is_finger_on = true;
+//             }
+
+//             // 2. 박동 검출 로직
+//             if (filtered_ir > last_filtered_ir) {
+//                 detector.rising = true;
+//             } 
+//             else if (filtered_ir < last_filtered_ir && detector.rising) {
+//                 if (filtered_ir > 15) { // 문턱값
+//                     detector.rising = false;
+//                     uint32_t duration = current_tick - detector.last_beat_tick;
+                    
+//                     // 3. 로그 기반 황금 간격 (45~120 Tick)
+//                     if (duration >= 45 && duration <= 120) {
+//                         int raw_bpm = 6000 / duration; 
+                        
+//                         // 이동 평균으로 BPM 안정화
+//                         h_data.bpm = (h_data.bpm == 0) ? raw_bpm : (h_data.bpm * 0.7) + (raw_bpm * 0.3);
+//                         calculate_health_metrics(&h_data);
+
+//                         // 결과 출력
+//                         printf("BPM: %d | SpO2: %d%%\n", h_data.bpm, (int)h_data.spo2);
+                        
+//                         // LED 피드백
+//                         PORTB |= (1 << LED_PIN); _delay_ms(15); PORTB &= ~(1 << LED_PIN);
+//                         detector.last_beat_tick = current_tick;
+//                     }
+//                 }
+//             }
+//         } 
+//         else {
+//             // 4. 손가락을 뗀 경우: 센서 및 필터 초기화
+//             if (is_finger_on) {
+//                 printf("Sensor Reset...\n");
+//                 MAX30102_Init(); // 센서 재시작 (버퍼 비우기)
+//                 ir_hpf.w = 0;     // 필터 잔상 제거
+//                 detector.rising = false;
+//                 h_data.bpm = 0;
+//                 is_finger_on = false;
+//             }
+//             if (current_tick % 500 == 0) printf("Place Finger...\n");
+//         }
+
+//         last_filtered_ir = filtered_ir;
+//         current_tick++;
+//         _delay_ms(10); 
+//     }
+// }
+
+// int main(void) {
+//     DDRB |= (1 << LED_PIN); 
+//     uart_init();
+//     stdout = uart_get_stdout();
+//     _delay_ms(500);
+
+//     run_test2_bpm_stable_monitoring(); 
+
+//     while (1); 
+//     return 0;
+// }
 
 //============이동 평균 필터===============
 
