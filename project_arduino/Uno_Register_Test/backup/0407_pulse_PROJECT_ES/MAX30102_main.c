@@ -40,15 +40,15 @@ ISR(INT0_vect) { data_ready = true; }
 
 // --- [2. 알고리즘 모듈] ---
 
-// 필터 계수를 0.90으로 조정하여 빠른 변화에 대응
-float apply_filter(HighPassFilter *f, uint32_t raw_val) {
+// 고역 통과 필터 (DC 제거)
+float apply_hpf(HighPassFilter *f, uint32_t raw_val) {
     float prev_w = f->w;
     f->w = (float)raw_val + (f->alpha * prev_w);
     return f->w - prev_w;
 }
 
 void update_health_stats(HealthData *d) {
-    // 평균값 추적을 더 부드럽게 (0.95 : 0.05)
+    // SpO2 계산을 위한 평균값 추적 (부드럽게 유지)
     d->red_avg = (d->red_avg * 0.98) + (d->red * 0.02);
     d->ir_avg = (d->ir_avg * 0.98) + (d->ir * 0.02);
     
@@ -58,41 +58,57 @@ void update_health_stats(HealthData *d) {
     if (d->ir_avg > 0) {
         float R = (fabs(red_ac) / d->red_avg) / (fabs(ir_ac) / d->ir_avg);
         float s = 110.0 - (25.0 * R);
-        if (s > 100.0) s = 100.0; if (s < 88.0) s = 88.0; // 하한선을 88로 상향
+        if (s > 100.0) s = 100.0; if (s < 88.0) s = 88.0;
         
-        // SpO2 값의 급격한 변화 방지 (느리게 반영)
+        // SpO2 값 안정화 (느린 반영)
         d->spo2 = (d->spo2 * 0.9) + (s * 0.1);
     }
 }
 
-// 박동 분석 엔진 (문턱값 및 범위 최적화)
-bool process_pulse_logic(HealthData *d, HighPassFilter *f, BeatDetector *bd, float *last_f) {
-    float cur_f = apply_filter(f, d->ir);
-    bool detected = false;
+// [정밀 버전] 박동 분석 엔진
+bool process_pulse_precision(HealthData *d, HighPassFilter *f, BeatDetector *bd, float *last_f) {
+    float hpf_val = apply_hpf(f, d->ir);
+    
+    // 1. 저역 통과 필터(LPF) 추가: 고주파 전기 노이즈 제거
+    static float smooth_f = 0;
+    smooth_f = (smooth_f * 0.7) + (hpf_val * 0.3);
 
-    if (cur_f > *last_f) bd->rising = true;
-    else if (cur_f < *last_f && bd->rising) {
-        // 문턱값을 30으로 높여 미세 노이즈 무시
-        if (cur_f > 30) { 
+    bool detected = false;
+    uint32_t interval = global_tick - bd->last_beat_tick;
+
+    // 2. 피크 검출 로직
+    if (smooth_f > *last_f) {
+        bd->rising = true;
+    } 
+    else if (bd->rising && smooth_f < *last_f) {
+        // 3. 정밀 필터링 조건
+        // - 문턱값 35 이상 (노이즈 방어)
+        // - 불응기 적용: 이전 박동 후 최소 0.45초(45틱) 경과 전에는 중복 카운트 안함
+        if (smooth_f > 35 && interval > 45) { 
             bd->rising = false;
-            uint32_t dur = global_tick - bd->last_beat_tick;
             
-            // 정상적인 인간의 맥박 범위 (40~130 BPM)에 집중
-            if (dur >= 45 && dur <= 150) { 
-                int raw = 6000 / dur;
-                // BPM 튀는 현상 방지 (이전 값 비중 확대)
-                d->bpm = (d->bpm == 0) ? raw : (d->bpm * 0.85) + (raw * 0.15);
+            if (interval <= 150) { // 비정상적으로 느린 박동(40BPM 미만) 제외
+                int raw_bpm = 6000 / interval;
+                
+                // 4. BPM 급변 방지: 이전 값과 차이가 너무 크면 보정
+                if (d->bpm == 0) {
+                    d->bpm = raw_bpm;
+                } else {
+                    // 이전 값 90% 반영으로 아주 부드러운 변화 유도
+                    d->bpm = (d->bpm * 0.9) + (raw_bpm * 0.1);
+                }
                 update_health_stats(d);
                 detected = true;
             }
             bd->last_beat_tick = global_tick;
         }
     }
-    *last_f = cur_f;
+    
+    *last_f = smooth_f;
     return detected;
 }
 
-// --- [3. 메인 로직] ---
+// --- [3. 메인 및 초기화] ---
 
 void init_all(void) {
     DDRB |= (1 << LED_PIN);
@@ -108,14 +124,14 @@ void init_all(void) {
 
     MAX30102_Init();
     MAX30102_Read_Interrupt_Status(); 
-    printf("\n[ SYSTEM CALIBRATED ]\n");
+    printf("\n[ PRECISION SYSTEM CALIBRATED ]\n");
 }
 
 int main(void) {
     init_all();
 
     HealthData h_data = {0, 0, 0, 0, 0, 98.0};
-    HighPassFilter ir_hpf = {0, 0.90}; // 필터 알파값 0.90으로 조정
+    HighPassFilter ir_hpf = {0, 0.90}; 
     BeatDetector detector = {0, false};
     float last_v = 0;
     bool is_on = false;
@@ -137,15 +153,16 @@ int main(void) {
                     printf("\n>>> Measuring...\n");
                 }
 
-                if (process_pulse_logic(&h_data, &ir_hpf, &detector, &last_v)) {
-                    // SpO2가 너무 낮게 나오면 출력 시 보정 (디스플레이용)
+                // 정밀 로직 함수 호출
+                if (process_pulse_precision(&h_data, &ir_hpf, &detector, &last_v)) {
                     printf("BPM: %d | SpO2: %d%%\n", h_data.bpm, (int)h_data.spo2);
+                    // 박동 피드백 LED
                     PORTB |= (1 << LED_PIN); _delay_ms(15); PORTB &= ~(1 << LED_PIN);
                 }
             } 
             else if (h_data.ir < 22000) {
                 if (is_on) {
-                    printf("\n>>> Stop. Resetting...\n");
+                    printf("\n>>> Resetting Stats...\n");
                     ir_hpf.w = 0; h_data.bpm = 0; h_data.spo2 = 98.0;
                     is_on = false;
                 }
@@ -162,7 +179,6 @@ int main(void) {
         }
     }
 }
-
 //============인터럽트 사용전===============
 // #ifndef UART_BAUD
 // #define UART_BAUD 9600UL
