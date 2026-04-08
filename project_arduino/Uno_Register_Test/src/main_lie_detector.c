@@ -62,8 +62,8 @@ int main(void) {
                 
                 float sum_bpm = 0;
                 int count = 0;
-                // 이미 센서가 돌고 있으므로 즉시 5초간 샘플링
-                for (int i = 0; i < 50; i++) {
+                // 이미 센서가 돌고 있으므로 즉시 10초간 샘플링
+                for (int i = 0; i < 100; i++) {
                     max30102_read_reg(MAX30102_REG_INTR_STATUS_1, &status);
                     if (status & 0xC0) {
                         max30102_read_fifo(&red_led, &ir_led);
